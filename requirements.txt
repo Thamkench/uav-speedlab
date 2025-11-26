@@ -1,0 +1,10 @@
+# Core detection & tracking
+ultralytics>=8.3.0
+
+# Basic numeric & image processing
+opencv-python>=4.7.0
+numpy>=1.23.0
+
+# Config & utilities
+PyYAML>=6.0
+tqdm>=4.65.0

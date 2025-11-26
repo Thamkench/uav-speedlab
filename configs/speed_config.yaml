@@ -1,0 +1,59 @@
+# configs/speed_config.yaml
+# Speed estimation & dynamic object config
+# 速度估计与动态目标相关配置
+
+model:
+  weights: "./weights/yolo11l-visdrone.pt"       # YOLO model weights path / YOLO 模型权重路径
+  imgsz: 960                                     # Inference image size / 推理输入尺寸
+  device: 0                                      # GPU device id (or 'cpu') / GPU 设备编号（或 'cpu'）
+
+tracking:
+  tracker_cfg: "./configs/trackers/botsort.yaml"  # Tracker config path / 跟踪器配置文件路径
+  conf: 0.3                                       # Detection confidence threshold / 检测置信度阈值
+
+dynamic_classes:
+  # Class names treated as dynamic vehicles.
+  # 会被视为“动态车辆”的类别名称（基于 model.names 的名字）。
+  # 对于 COCO 预训练，通常包括：
+  # - car, bus, truck, motorcycle, bicycle
+  names:
+    - car
+    - van
+    - truck
+    - bus
+
+  # If you prefer to specify by id, you can fill this after printing model.names.
+  # 如果你更习惯按 id 指定，可以在打印 model.names 后填写这里。
+  ids: []   # e.g. [2, 3, 5, 7]
+
+speed:
+  # Approximate car length (meters) / 近似车辆长度（米）
+  # 之前是单一 car_length_m，这里改为“默认长度 + 按类别长度覆盖”。
+  default_length_m: 5.0
+
+  # Per-class approximate vehicle lengths (meters)
+  # 按类别设置的车辆近似长度（米），键名需与 model.names 中的类别名称一致。
+  # 下面是一个典型设置（可根据你自己的数据集/场景微调）：
+  # - car   ~ 4.5 m  : 小轿车
+  # - van   ~ 5.0 m  : 面包车/厢式车
+  # - truck ~ 9.0 m  : 中型卡车（轻卡 6–7 m，重卡 12–13 m，这里取中等偏上）
+  # - bus   ~ 11.0 m : 城市公交车
+  class_length_m:
+    car: 4.8
+    van: 5.0
+    truck: 9.0
+    bus: 11.0
+
+  ema_alpha_mpp: 0.30       # EMA factor for meters-per-pixel / 像素-米比例的指数平滑系数
+  ema_alpha_speed: 0.60     # EMA factor for speed / 速度的指数平滑系数
+  min_mpp: 0.005            # Lower bound of meters-per-pixel / 像素-米比例下界
+  max_mpp: 0.5              # Upper bound / 上界
+  max_speed_mps: 60.0       # Clamp speed (m/s) to filter outliers / 速度上限（米/秒），用于剔除离群值
+
+static_detection:
+  d_static_px: 2.5          # Distance threshold for static hypothesis / 静止判定的位移阈值
+  d_moving_px: 5.0          # Distance threshold for moving hypothesis / 运动判定的位移阈值
+  r_static_mean: 12.0       # Residual mean threshold for static / 亮度残差静止阈值
+  r_moving_mean: 25.0       # Residual mean threshold for moving / 亮度残差运动阈值
+  k_static: 6               # Hysteresis: frames to confirm static / 迟滞：连续多少帧判定为静止
+  k_moving: 2               # Hysteresis: frames to confirm moving / 迟滞：连续多少帧判定为运动
