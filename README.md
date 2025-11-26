@@ -5,9 +5,9 @@
 ## 🎬 Demo Gallery (UAV speed estimation)
 
 <p align="center">
-  <video src="data/output/demo_M0703.mp4" width="32%" controls muted loop></video>
-  <video src="data/output/demo_M1003.mp4" width="32%" controls muted loop></video>
-  <video src="data/output/demo_M1303.mp4" width="32%" controls muted loop></video>
+  <img src="assets/demo_M0703.gif" width="32%" alt="Demo M0703" />
+  <img src="assets/demo_M1003.gif" width="32%" alt="Demo M1003" />
+  <img src="assets/demo_M1303.gif" width="32%" alt="Demo M1303" />
 </p>
 
 This repository provides a **practical, end-to-end pipeline** to estimate vehicle speed from **monocular UAV videos**.  
