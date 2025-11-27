@@ -1,5 +1,7 @@
 # UAV-Speed: Monocular UAV Vehicle Speed Estimation Pipeline
 
+[🇨🇳 中文说明](README_ch.md) ｜ [🇬🇧 English README](README.md)
+
 > YOLOv11 + BoT-SORT + Homography-based motion compensation for **vehicle speed estimation** under UAV oblique-view scenarios.
 
 ## 🎬 Demo Gallery (UAV speed estimation)
