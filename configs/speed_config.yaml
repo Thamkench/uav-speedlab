@@ -57,3 +57,39 @@ static_detection:
   r_moving_mean: 25.0       # Residual mean threshold for moving / 亮度残差运动阈值
   k_static: 6               # Hysteresis: frames to confirm static / 迟滞：连续多少帧判定为静止
   k_moving: 2               # Hysteresis: frames to confirm moving / 迟滞：连续多少帧判定为运动
+
+weighted_speed:
+  enabled: false          # Enable confidence-weighted speed smoothing / 启用“置信度加权”的速度平滑（建议先保持 false）
+
+  # --- bbox size consistency weight (w_bbox) / bbox 尺度一致性权重（w_bbox）---
+  # We maintain a per-track EMA reference size s_ref, and down-weight when current bbox size deviates.
+  # 为每个 track 维护 bbox 尺度的 EMA 参考值 s_ref，当前 bbox 尺度偏离越大，权重越小。
+  bbox:
+    rho_size: 0.93        # EMA factor for bbox size reference / bbox 尺度参考的 EMA 系数（越大越稳）
+    sigma_bbox: 0.25      # Sensitivity of bbox deviation mapping / 尺度偏离映射的敏感度（越小越敏感）
+    w_min_bbox: 0.30      # Minimum bbox weight floor / bbox 权重下限（避免卡死）
+
+  # --- speed jump gating (w_deltaV) / 速度跳变门控权重（w_deltaV）---
+  # ΔVmax = dv_a + dv_b * V_smooth(km/h); larger dv => smaller weight.
+  # 允许的最大速度跳变：ΔVmax = dv_a + dv_b * V_smooth(km/h)；跳变越大，权重越小。
+  deltaV:
+    p: 3.0                # Soft-gating exponent (larger -> harder) / 软门控指数（越大越“硬”）
+    w_min_dv: 0.25        # Minimum deltaV weight floor / 跳变门控权重下限（避免一直只看历史）
+    dv_a: 10.0            # ΔVmax constant term (km/h) / ΔVmax 的固定项（km/h）
+    dv_b: 0.15            # ΔVmax proportional term / ΔVmax 的比例项（随速度增大）
+
+  # --- image border weight (w_edge) / 图像边缘权重（w_edge）---
+  # Down-weight near borders since homography/boxes tend to be unstable there.
+  # 靠近图像边缘时更容易不稳定（单应/框抖动），因此降低权重。
+  edge:
+    edge_ratio: 0.10      # Border band ratio of min(W,H) / 边缘带宽比例（相对 min(W,H)）
+    w_min_edge: 0.40      # Minimum edge weight floor / 边缘权重下限
+
+  # --- total weight smoothing / 总权重平滑（W 的 EMA）---
+  # W_raw = w_bbox * w_homo * w_deltaV * w_edge, then apply EMA to W for stability.
+  # 先合成 W_raw = w_bbox * w_homo * w_deltaV * w_edge，再对 W 做 EMA 使其更稳定。
+  weight_smooth:
+    eta_w: 0.90           # EMA factor for total W / 总权重 W 的 EMA 系数（越大越稳）
+    W_floor: 0.10         # Minimum total weight floor / 总权重下限（防止“卡死”）
+
+  eps: 1e-6               # Small epsilon to avoid division by zero / 数值稳定项（避免除零）
