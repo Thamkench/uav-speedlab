@@ -15,6 +15,7 @@ from ultralytics import YOLO
 
 from src.config.loader import load_speed_config, resolve_dynamic_ids
 from src.vis.draw import draw_label
+from src.motion.weighted_speed_smoother import WeightedSpeedParams, WeightedSpeedSmoother
 
 
 # ===== 颜色（BGR）=====
@@ -122,6 +123,16 @@ class SpeedPipeline:
         # --- 动态类 bbox 外扩比例，用于抠掉前景 ---
         self.expand_ratio: float = dyn_cfg.get("expand_ratio", 0.03)
 
+        # --- Weighted speed smoothing (confidence-weighted) / 置信度加权速度平滑 ---
+        self.ws_params = WeightedSpeedParams.from_cfg(self.cfg)
+        self.ws_smoother = WeightedSpeedSmoother(self.ws_params) if self.ws_params.enabled else None
+
+        # --- Debug dump config / 调试导出配置（默认关闭，不影响性能）---
+        ws_cfg = self.cfg.get("weighted_speed", {}) or {}
+        self.ws_debug_cfg = ws_cfg.get("debug", {}) or {}
+        self.ws_debug_on = bool(self.ws_debug_cfg.get("enabled", False))
+        self.ws_debug_every = int(self.ws_debug_cfg.get("dump_every", 1))
+
     # ------------------------------------------------------------------
     # 工具：根据类别名称返回近似车长（米），优先用 class_length_m，退回 default_length_m。
     # ------------------------------------------------------------------
@@ -144,6 +155,11 @@ class SpeedPipeline:
             return float(self.CAR_LEN_M)
 
     def run(self, video_path: str, out_path: str) -> None:
+        import os
+        import cv2
+        import numpy as np
+        from typing import Dict
+
         cap = cv2.VideoCapture(video_path)
         assert cap.isOpened(), f"Cannot open video: {video_path}"
 
@@ -153,11 +169,9 @@ class SpeedPipeline:
         cap.release()
 
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        vw = cv2.VideoWriter(
-            out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H)
-        )
+        vw = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
 
-        # YOLO 跟踪流
+        # YOLO tracking stream
         stream = self.model.track(
             source=video_path,
             conf=self.conf,
@@ -169,12 +183,15 @@ class SpeedPipeline:
             persist=True,
         )
 
-        # ==== 状态机 & 速度缓存（完全沿用你旧脚本）====
+        # ==== State machine & caches (keep old behavior) ====
         static_cnt: Dict[int, int] = {}
         moving_cnt: Dict[int, int] = {}
         state: Dict[int, str] = {}  # 'static' / 'moving' / 'unknown'
         mpp_ema: Dict[int, float] = {}
-        speed_ema: Dict[int, float] = {}  # m/s
+        speed_ema: Dict[int, float] = {}  # OLD display speed state (m/s)  <-- keep unchanged for overlay
+
+        # ==== NEW: WS parallel speed state (m/s) for closed-loop comparison ====
+        speed_ema_ws: Dict[int, float] = {}  # NEW ws-logic closed-loop state (m/s), NOT used for overlay
 
         last_boxes = None
         last_gray = None
@@ -183,16 +200,23 @@ class SpeedPipeline:
 
         orb = cv2.ORB_create(nfeatures=self.nfeatures)
 
+        # --- Debug rows ---
+        debug_rows = []
+        dbg_cnt = 0
+
         global_idx = -1
+        # --- Homography quality cache (for whomo) ---
+        homo_inlier_ratio = None
+        homo_inlier_count = None
+
         for r in stream:
             global_idx += 1
             frame = r.orig_img  # BGR
             vis = frame.copy()
 
-            # 当前模型类别名称映射（id → name）
             names = getattr(r, "names", None) or getattr(self.model, "names", {})
 
-            # 当前帧检测/跟踪结果
+            # current boxes
             if r.boxes is not None and len(r.boxes) > 0:
                 bb = r.boxes
                 boxes = bb.xyxy.cpu().numpy()
@@ -209,13 +233,11 @@ class SpeedPipeline:
 
             gray_now = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-            # ================= Homography + 状态/速度更新 =================
-            need_pair = (last_idx is None) or (
-                (global_idx - last_idx) >= self.delta_frames
-            )
+            # ================= Homography + state/speed update =================
+            need_pair = (last_idx is None) or ((global_idx - last_idx) >= self.delta_frames)
 
             if need_pair and last_gray is not None and last_boxes is not None:
-                # 背景 mask（上一关键帧 vs 当前帧）
+                # background masks
                 mask_prev = make_bg_mask(
                     (H, W, 3),
                     last_boxes["boxes"],
@@ -231,17 +253,17 @@ class SpeedPipeline:
                     self.expand_ratio,
                 )
 
-                # ORB 特征
+                # ORB features
                 kp1, des1 = orb.detectAndCompute(last_gray, mask_prev)
                 kp2, des2 = orb.detectAndCompute(gray_now, mask_now)
 
                 Hmat = None
                 H_ok = False
                 if (
-                    des1 is not None
-                    and des2 is not None
-                    and len(kp1) >= 20
-                    and len(kp2) >= 20
+                        des1 is not None
+                        and des2 is not None
+                        and len(kp1) >= 20
+                        and len(kp2) >= 20
                 ):
                     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
                     knn = bf.knnMatch(des1, des2, k=2)
@@ -250,12 +272,8 @@ class SpeedPipeline:
                         if m.distance < self.ratio_thresh * n.distance:
                             good.append(m)
                     if len(good) >= 30:
-                        pts_prev = np.float32(
-                            [kp1[m.queryIdx].pt for m in good]
-                        )
-                        pts_now = np.float32(
-                            [kp2[m.trainIdx].pt for m in good]
-                        )
+                        pts_prev = np.float32([kp1[m.queryIdx].pt for m in good])
+                        pts_now = np.float32([kp2[m.trainIdx].pt for m in good])
                         Hmat, inl = cv2.findHomography(
                             pts_prev,
                             pts_now,
@@ -265,79 +283,63 @@ class SpeedPipeline:
                             confidence=self.confidence,
                         )
                         if (
-                            Hmat is not None
-                            and inl is not None
-                            and inl.sum() >= 0.5 * len(good)
+                                Hmat is not None
+                                and inl is not None
+                                and inl.sum() >= 0.5 * len(good)
                         ):
                             H_ok = True
-                            last_H = Hmat  # 记录一个“备用 H”
+                            last_H = Hmat
+                            inl_cnt = int(inl.sum())
+                            good_cnt = max(len(good), 1)
+                            homo_inlier_ratio = inl_cnt / good_cnt
+                            homo_inlier_count = inl_cnt
 
                 if not H_ok and last_H is None:
-                    # 本次失败且没有备用 H：只更新关键帧缓存，跳过判定
+                    # no H available: refresh keyframe cache only
                     last_gray = gray_now
-                    last_boxes = {
-                        "boxes": boxes,
-                        "clses": clses,
-                        "ids": ids,
-                    }
+                    last_boxes = {"boxes": boxes, "clses": clses, "ids": ids}
                     last_idx = global_idx
                 else:
                     if not H_ok:
-                        Hmat = last_H  # 回退用旧 H
+                        Hmat = last_H
+                        homo_inlier_ratio = 0.0
+                        homo_inlier_count = 0
 
-                    # 亮度残差图（把 prev warp 到 now）
                     gray_prev_warp = cv2.warpPerspective(last_gray, Hmat, (W, H))
                     R = cv2.absdiff(
                         cv2.GaussianBlur(gray_now, (5, 5), 0),
                         cv2.GaussianBlur(gray_prev_warp, (5, 5), 0),
                     )
 
-                    # 上一关键帧的车辆中心
+                    # centers on last keyframe
                     prev_centers: Dict[int, tuple[float, float]] = {}
-                    for (b, tid, c) in zip(
-                        last_boxes["boxes"],
-                        last_boxes["ids"],
-                        last_boxes["clses"],
-                    ):
+                    for (b, tid, c) in zip(last_boxes["boxes"], last_boxes["ids"], last_boxes["clses"]):
                         if int(c) not in self.vehicle_ids:
                             continue
                         cx = 0.5 * (b[0] + b[2])
                         cy = 0.5 * (b[1] + b[3])
                         prev_centers[int(tid)] = (cx, cy)
 
-                    dt = max(
-                        1e-6, float(global_idx - last_idx) / float(fps)
-                    )  # 关键帧间时间
+                    dt = max(1e-6, float(global_idx - last_idx) / float(fps))
 
-                    # 当前帧：对同时出现的 ID 做判定 + 速度
+                    # update for ids present in both frames
                     for (b, tid, c) in zip(boxes, ids, clses):
                         tid = int(tid)
                         if int(c) not in self.vehicle_ids:
                             continue
                         if tid not in prev_centers:
-                            continue  # 新出现/刚恢复
+                            continue
 
-                        # 几何位移（相机补偿后）
+                        # compensated displacement
                         cx_now = 0.5 * (b[0] + b[2])
                         cy_now = 0.5 * (b[1] + b[3])
-                        prev_pt = np.array(
-                            [
-                                [
-                                    prev_centers[tid][0],
-                                    prev_centers[tid][1],
-                                    1.0,
-                                ]
-                            ],
-                            dtype=np.float32,
-                        ).T
+                        prev_pt = np.array([[prev_centers[tid][0], prev_centers[tid][1], 1.0]], dtype=np.float32).T
                         proj = Hmat @ prev_pt
                         proj /= proj[2] + 1e-9
                         cx_proj, cy_proj = float(proj[0]), float(proj[1])
-                        d = float(
-                            np.hypot(cx_now - cx_proj, cy_now - cy_proj)
-                        )  # px
+                        d = float(np.hypot(cx_now - cx_proj, cy_now - cy_proj))
 
-                        # 亮度残差
+                        # photometric residual
                         er = erode_bbox(b, 0.15, W, H)
                         r_mean = 999.0
                         if er is not None:
@@ -346,17 +348,13 @@ class SpeedPipeline:
                             if roi.size > 0:
                                 r_mean = float(roi.mean())
 
-                        # ======= 静/动状态机（沿用旧脚本）=======
+                        # ======= static/moving FSM (old) =======
                         static_cnt.setdefault(tid, 0)
                         moving_cnt.setdefault(tid, 0)
                         state.setdefault(tid, "unknown")
 
-                        is_static_ev = (d <= self.D_STATIC_PX) and (
-                            r_mean <= self.R_STATIC_MEAN
-                        )
-                        is_moving_ev = (d >= self.D_MOVING_PX) or (
-                            r_mean >= self.R_MOVING_MEAN
-                        )
+                        is_static_ev = (d <= self.D_STATIC_PX) and (r_mean <= self.R_STATIC_MEAN)
+                        is_moving_ev = (d >= self.D_MOVING_PX) or (r_mean >= self.R_MOVING_MEAN)
 
                         if is_static_ev:
                             static_cnt[tid] += 1
@@ -373,92 +371,158 @@ class SpeedPipeline:
                         elif moving_cnt[tid] >= self.K_MOVING:
                             state[tid] = "moving"
 
-                        # ======= 简易速度（车长→mpp→v，支持按类别车长）=======
+                        # ======= mpp =======
                         w_box = float(b[2] - b[0])
                         h_box = float(b[3] - b[1])
                         long_edge = max(w_box, h_box)
                         if long_edge <= max(1e-6, self.MIN_LONG_EDGE):
                             continue
 
-                        # 按类别名称取车长（米），car/van/truck/bus 可不同
                         cname = names.get(int(c), str(int(c)))
                         length_m = self._get_vehicle_length_m(cname)
 
-                        mpp_now = length_m / long_edge
-                        mpp_now = float(
-                            np.clip(mpp_now, self.MIN_MPP, self.MAX_MPP)
-                        )
+                        mpp_now = float(np.clip(length_m / long_edge, self.MIN_MPP, self.MAX_MPP))
                         if tid in mpp_ema:
-                            mpp_ema[tid] = (
-                                self.EMA_ALPHA_MPP * mpp_now
-                                + (1 - self.EMA_ALPHA_MPP) * mpp_ema[tid]
-                            )
+                            mpp_ema[tid] = self.EMA_ALPHA_MPP * mpp_now + (1 - self.EMA_ALPHA_MPP) * mpp_ema[tid]
                         else:
                             mpp_ema[tid] = mpp_now
 
-                        # 只对非静止车辆更新速度
-                        if (not self.SHOW_MOVING_ONLY) or (
-                            state.get(tid) != "static"
-                        ):
+                        # ======= speed update (only non-static if SHOW_MOVING_ONLY) =======
+                        if (not self.SHOW_MOVING_ONLY) or (state.get(tid) != "static"):
                             v_mps = (d * mpp_ema[tid]) / dt
                             if v_mps <= self.MAX_MPS_CLAMP:
+                                # ---------- raw / old / ema (km/h) ----------
+                                v_raw_kmh = float(v_mps * 3.6)
+
+                                # OLD displayed state (m/s)
+                                v_old_mps = float(speed_ema.get(tid, v_mps))
+                                v_old_kmh = float(v_old_mps * 3.6)
+
+                                # old EMA prediction (for logging only)
                                 if tid in speed_ema:
-                                    speed_ema[tid] = (
-                                        self.EMA_ALPHA_SPEED * v_mps
-                                        + (1 - self.EMA_ALPHA_SPEED)
-                                        * speed_ema[tid]
+                                    v_ema_mps = self.EMA_ALPHA_SPEED * v_mps + (1 - self.EMA_ALPHA_SPEED) * speed_ema[
+                                        tid]
+                                else:
+                                    v_ema_mps = v_mps
+                                v_ema_kmh = float(v_ema_mps * 3.6)
+
+                                # ---------- WS components & WS "measurement" ----------
+                                v_ws_kmh = None
+                                v_ws_mps_meas = None
+                                v_ws_ema_kmh = None
+
+                                wb = we = wd = wh = W_raw = W_final = None
+                                W_use = None
+
+                                if self.ws_smoother is not None:
+                                    cx = 0.5 * (b[0] + b[2])
+                                    cy = 0.5 * (b[1] + b[3])
+                                    wb, we, wd, wh, W_raw, W_final = self.ws_smoother.compute_components(
+                                        tid=tid,
+                                        bbox_w=w_box,
+                                        bbox_h=h_box,
+                                        cx=cx, cy=cy,
+                                        imgW=W, imgH=H,
+                                        v_meas_kmh=v_raw_kmh,
+                                        v_smooth_kmh=v_old_kmh,  # keep reference as OLD smooth for fair comparison
+                                        inlier_ratio=homo_inlier_ratio,
+                                        inlier_count=homo_inlier_count,
                                     )
+
+                                    alpha0 = float(self.EMA_ALPHA_SPEED)  # cap
+                                    W_use = min(float(W_final), alpha0)
+
+                                    # WS "measurement" (km/h) using capped weight
+                                    v_ws_kmh = float(W_use * v_raw_kmh + (1.0 - W_use) * v_old_kmh)
+                                    v_ws_mps_meas = float(v_ws_kmh / 3.6)
+
+                                # ---------- Update OLD logic speed_ema (MUST remain unchanged for video overlay) ----------
+                                if tid in speed_ema:
+                                    speed_ema[tid] = self.EMA_ALPHA_SPEED * v_mps + (1 - self.EMA_ALPHA_SPEED) * \
+                                                     speed_ema[tid]
                                 else:
                                     speed_ema[tid] = v_mps
 
-                    # 更新关键帧缓存
+                                # ---------- Update NEW WS closed-loop state (for true comparison; NOT used in overlay) ----------
+                                if self.ws_smoother is not None and v_ws_mps_meas is not None:
+                                    if tid in speed_ema_ws:
+                                        speed_ema_ws[tid] = self.EMA_ALPHA_SPEED * v_ws_mps_meas + (
+                                                    1 - self.EMA_ALPHA_SPEED) * speed_ema_ws[tid]
+                                    else:
+                                        speed_ema_ws[tid] = v_ws_mps_meas
+                                    v_ws_ema_kmh = float(speed_ema_ws[tid] * 3.6)
+
+                                # ---------- Debug row ----------
+                                if self.ws_debug_on:
+                                    dbg_cnt += 1
+                                    if self.ws_debug_every <= 1 or (dbg_cnt % self.ws_debug_every == 0):
+                                        debug_rows.append({
+                                            "frame": global_idx,
+                                            "dt": dt,
+                                            "class_id": int(c),
+                                            "class_name": cname,
+                                            "tid": int(tid),
+                                            "state": state.get(tid, "unknown"),
+                                            "d_px": float(d),
+                                            "long_edge_px": float(long_edge),
+                                            "mpp": float(mpp_ema.get(tid, 0.0)),
+
+                                            "v_raw_kmh": v_raw_kmh,
+                                            "v_old_kmh": v_old_kmh,
+                                            "v_ema_kmh": v_ema_kmh,
+
+                                            # ws instantaneous (measurement-like)
+                                            "v_ws_kmh": v_ws_kmh,
+
+                                            # ws closed-loop state (THIS is the real comparison curve)
+                                            "v_ws_ema_kmh": v_ws_ema_kmh,
+
+                                            "wbbox": wb,
+                                            "wedge": we,
+                                            "wdv": wd,
+                                            "whomo": wh,
+                                            "W_raw": W_raw,
+                                            "W_final": W_final,
+                                            "W_use": W_use,
+                                        })
+
+                    # update keyframe cache
                     last_gray = gray_now
-                    last_boxes = {
-                        "boxes": boxes,
-                        "clses": clses,
-                        "ids": ids,
-                    }
+                    last_boxes = {"boxes": boxes, "clses": clses, "ids": ids}
                     last_idx = global_idx
 
-            # 初始化第一帧关键帧
+            # init first keyframe
             if last_idx is None:
                 last_gray = gray_now
                 last_boxes = {"boxes": boxes, "clses": clses, "ids": ids}
                 last_idx = global_idx
 
-            # ================= 统一画框 + 速度 + STATIC =================
+            # ================= overlay (KEEP OLD VIDEO DISPLAY UNCHANGED) =================
             for (x1, y1, x2, y2), tid, c in zip(boxes, ids, clses):
                 tid = int(tid)
                 cname = names.get(int(c), str(int(c)))
 
-                # 只对需要测速的类别画（car/bus/truck 等）
                 if int(c) not in self.vehicle_ids:
                     continue
 
                 st = state.get(tid, "unknown")
                 scnt = static_cnt.get(tid, 0)
-                has_speed = tid in speed_ema  # 是否已经算出速度
+                has_speed = tid in speed_ema  # OLD has-speed
 
-                # ===== 状态 1：静止 =====
                 if st == "static" and scnt >= self.K_STATIC:
                     color = COLOR_STATIC
                     thickness = 2
-                    label = "STATIC"  # 只显示 STATIC，不显示 id/类别
-
-                # ===== 状态 2：有速度（认为在动）=====
+                    label = "STATIC"
                 elif has_speed:
                     color = COLOR_MOVING
                     thickness = 2
-                    kmh = float(speed_ema[tid] * 3.6)
-                    label = f"{kmh:4.1f} km/h"  # 只显示速度
-
-                # ===== 状态 3：还没出结果 / 正在等待 =====
+                    kmh = float(speed_ema[tid] * 3.6)  # OLD display (unchanged)
+                    label = f"{kmh:4.1f} km/h"
                 else:
                     color = COLOR_NO_RESULT
                     thickness = 1
-                    label = f"{cname} ID {tid}"  # 灰色显示类别+ID
+                    label = f"{cname} ID {tid}"
 
-                # 画框 + label
                 cv2.rectangle(
                     vis,
                     (int(x1), int(y1)),
@@ -472,4 +536,25 @@ class SpeedPipeline:
             vw.write(vis)
 
         vw.release()
+
+        # ---------- Dump debug logs ----------
+        if self.ws_debug_on and len(debug_rows) > 0:
+            import pandas as pd
+            out_dir = str(self.ws_debug_cfg.get("out_dir", "runs/debug"))
+            out_name = str(self.ws_debug_cfg.get("out_name", "speed_debug.csv"))
+            export_excel = bool(self.ws_debug_cfg.get("export_excel", False))
+
+            os.makedirs(out_dir, exist_ok=True)
+            csv_path = os.path.join(out_dir, out_name)
+
+            df = pd.DataFrame(debug_rows)
+            df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+            if export_excel:
+                xlsx_path = csv_path[:-4] + ".xlsx" if csv_path.lower().endswith(".csv") else (csv_path + ".xlsx")
+                df.to_excel(xlsx_path, index=False)
+
+            print(f"[DEBUG] Saved speed debug logs: {csv_path}")
+
         print(f"[OK] Saved speed-annotated video: {out_path}")
+

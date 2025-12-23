@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional
 import math
+import numpy as np
 
 
 # -------------------------
@@ -67,6 +68,14 @@ class WeightedSpeedParams:
     # numeric epsilon / 数值稳定项
     eps: float = 1e-6
 
+    homo_enabled: bool = True
+    homo_r0: float = 0.5
+    homo_N0: float = 60
+    w_min_h: float = 0.30
+
+
+
+
     @staticmethod
     def from_cfg(cfg: dict) -> "WeightedSpeedParams":
         """
@@ -78,6 +87,7 @@ class WeightedSpeedParams:
         dv = ws.get("deltaV", {}) or {}
         edge = ws.get("edge", {}) or {}
         wsm = ws.get("weight_smooth", {}) or {}
+        homo = ws.get("homo", {}) or {}
 
         return WeightedSpeedParams(
             enabled=bool(ws.get("enabled", False)),
@@ -98,6 +108,12 @@ class WeightedSpeedParams:
             W_floor=float(wsm.get("W_floor", 0.10)),
 
             eps=float(ws.get("eps", 1e-6)),
+
+            homo_enabled=bool(homo.get("enabled", True)),
+            homo_r0=float(homo.get("r0", 0.50)),
+            homo_N0=float(homo.get("N0", 60)),
+            w_min_h=float(homo.get("w_min_h", 0.30)),
+
         )
 
 
@@ -186,15 +202,32 @@ class WeightedSpeedSmoother:
         w = self.p.w_min_dv + (1.0 - self.p.w_min_dv) * soft
         return clamp01(w)
 
-    def w_homo(self, q_h: Optional[float] = None) -> float:
+    def w_homo(self, inlier_ratio: Optional[float] = None, inlier_count: Optional[int] = None) -> float:
         """
-        homography quality weight / 单应质量权重（占位）
-        q_h: a quality score in [0,1], larger is better.
-        这里先做占位：如果没有 q_h，就返回 1.0
+        homography quality weight / 单应质量权重
+        Uses inlier ratio and inlier count, maps to [w_min_h, 1].
+        用内点比例+内点数量估计单应质量，并映射到 [w_min_h, 1]。
         """
-        if q_h is None:
+        if not self.p.homo_enabled:
             return 1.0
-        return clamp01(float(q_h))
+        if inlier_ratio is None or inlier_count is None:
+            return 1.0
+
+        r = float(inlier_ratio)
+        n = float(inlier_count)
+
+        # ratio quality: (r - r0) / (1 - r0)
+        qr = (r - self.p.homo_r0) / max(1.0 - self.p.homo_r0, self.p.eps)
+        qr = float(np.clip(qr, 0.0, 1.0))
+
+        # count quality: n / N0
+        qn = n / max(self.p.homo_N0, 1.0)
+        qn = float(np.clip(qn, 0.0, 1.0))
+
+        q_h = qr * qn  # in [0,1]
+
+        # map to [w_min_h, 1]
+        return float(self.p.w_min_h + (1.0 - self.p.w_min_h) * q_h)
 
     # ------------------------------------------------------------------
     # Total weight W / 总权重 W
@@ -210,7 +243,8 @@ class WeightedSpeedSmoother:
         imgH: int,
         v_meas_kmh: float,
         v_smooth_kmh: float,
-        q_h: Optional[float] = None,
+        inlier_ratio: Optional[float] = None,
+        inlier_count: Optional[int] = None,
     ) -> float:
         """
         Compute final W for tid / 计算 tid 对应的最终权重 W。
@@ -221,7 +255,7 @@ class WeightedSpeedSmoother:
         wb = self.w_bbox(tid, bbox_w, bbox_h)
         we = self.w_edge(cx, cy, imgW, imgH)
         wd = self.w_deltav(v_meas_kmh, v_smooth_kmh)
-        wh = self.w_homo(q_h)
+        wh = self.w_homo(inlier_ratio, inlier_count)
 
         W_raw = wb * we * wd * wh
         W_raw = clamp01(W_raw)
@@ -233,6 +267,42 @@ class WeightedSpeedSmoother:
         # floor clamp / 地板
         W_final = clamp(st.W_smooth, self.p.W_floor, 1.0)
         return W_final
+
+    def compute_components(
+        self,
+        tid: int,
+        bbox_w: float,
+        bbox_h: float,
+        cx: float,
+        cy: float,
+        imgW: int,
+        imgH: int,
+        v_meas_kmh: float,
+        v_smooth_kmh: float,
+        inlier_ratio: Optional[float] = None,
+        inlier_count: Optional[int] = None,
+    ):
+        """
+        Compute weight components and final W / 计算权重分量与最终 W（用于调试分析）
+
+        Returns / 返回：
+            wbbox, wedge, wdv, whomo, W_raw, W_final
+        """
+        wb = self.w_bbox(tid, bbox_w, bbox_h)
+        we = self.w_edge(cx, cy, imgW, imgH)
+        wd = self.w_deltav(v_meas_kmh, v_smooth_kmh)
+        wh = self.w_homo(inlier_ratio, inlier_count)
+
+        W_raw = wb * we * wd * wh
+        W_raw = clamp01(W_raw)
+
+        # EMA on W / 对 W 做 EMA 平滑
+        st = self._get_state(tid)
+        st.W_smooth = self.p.eta_w * st.W_smooth + (1.0 - self.p.eta_w) * W_raw
+
+        # floor clamp / 地板
+        W_final = clamp(st.W_smooth, self.p.W_floor, 1.0)
+        return wb, we, wd, wh, W_raw, W_final
 
     # ------------------------------------------------------------------
     # Optional: apply smoothing / 可选：直接输出平滑速度
@@ -248,7 +318,8 @@ class WeightedSpeedSmoother:
         cy: float,
         imgW: int,
         imgH: int,
-        q_h: Optional[float] = None,
+        inlier_ratio: Optional[float] = None,
+        inlier_count: Optional[int] = None,
     ) -> float:
         """
         One-stop API: compute W and output v_smooth_new.
@@ -266,6 +337,7 @@ class WeightedSpeedSmoother:
             imgH=imgH,
             v_meas_kmh=v_meas_kmh,
             v_smooth_kmh=v_smooth_old_kmh,
-            q_h=q_h,
+            inlier_ratio=inlier_ratio,
+            inlier_count=inlier_count,
         )
         return W * float(v_meas_kmh) + (1.0 - W) * float(v_smooth_old_kmh)
