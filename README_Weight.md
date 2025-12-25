@@ -239,11 +239,12 @@ preserving responsiveness under normal motion patterns.
 
 ### 8. Discussion
 
-The proposed confidence-weighted exponential moving average integrates multiple
-reliability cues into a unified adaptive smoothing framework. Compared with a
-fixed-coefficient EMA, the method maintains responsiveness under high-confidence
-conditions while providing strong robustness against detection noise, geometric
-instability, border effects, and abnormal speed jumps. As a result, the displayed
-speed signal becomes temporally smooth, physically plausible, and visually
-interpretable, which is critical for practical UAV-based monitoring and traffic
-analysis applications.
+The proposed confidence-weighted exponential moving average incorporates multiple factors related to the reliability of speed estimation into a unified adaptive smoothing framework. Compared with the fixed-coefficient EMA method, this approach maintains good responsiveness under high-confidence conditions, while exhibiting stronger robustness in the presence of detection noise, geometric instability, image border effects, and abnormal speed variations. The resulting speed estimates are temporally smoother, physically more reasonable, and more interpretable, making the method suitable for practical UAV-based monitoring and traffic analysis scenarios.
+
+The method was evaluated on representative target trajectories from two real UAV video sequences **M0703** and **M1003**, where speed profiles obtained from raw measurements, fixed-coefficient EMA, and confidence-weighted EMA were compared. The experimental results show that, across different speed ranges and motion patterns, the confidence-weighted EMA effectively suppresses local anomalous fluctuations while preserving the overall speed evolution trend, demonstrating its stability and practical effectiveness in complex real-world conditions.
+
+![M0703 speed comparison](assets/M0703.png)
+
+![M1003 speed comparison](assets/M1003.png)
+
+From an implementation perspective, the method is fully managed through a configuration file. Users can flexibly enable or disable confidence-weighted smoothing, adjust relevant weighting and threshold parameters, and optionally export diagnostic speed and weight statistics for analysis and evaluation via `speed_config.yaml`, allowing a controlled trade-off between stability, responsiveness, and analysis requirements.

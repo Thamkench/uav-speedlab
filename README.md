@@ -21,6 +21,18 @@ The pipeline is designed for **daily inspection flights** (low–medium altitude
 
 ---
 
+## Updates
+
+### 2025-12-23 — Confidence-Weighted Speed Smoothing
+
+A confidence-weighted exponential moving average was introduced to improve the robustness and interpretability of UAV-based speed estimation under complex observation conditions.
+
+- 📄 **English documentation**: [README_Weight.md](README_Weight.md)
+- 📄 **中文说明文档**： [README_Weight_ch.md](README_Weight_ch.md)
+
+This update adds configuration-level control for enabling or disabling weighted smoothing, tuning reliability-related parameters, and exporting diagnostic statistics, while remaining backward compatible with the original fixed-coefficient EMA pipeline.
+
+
 ## ✨ Key Features
 
 - **Object detection:** YOLOv11 for vehicle/person detection.

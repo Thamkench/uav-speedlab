@@ -45,12 +45,28 @@ static_detection:
   k_static: 6                    # Hysteresis frames to confirm static / 连续多少帧判定静止
   k_moving: 2                    # Hysteresis frames to confirm moving / 连续多少帧判定运动
 
+homography:
+  # Background homography estimation (ORB + BFMatcher + RANSAC)
+  # 背景单应估计（ORB + BFMatcher + RANSAC），用于抵消无人机自运动
+  delta_frames: 5           # 每隔多少帧进行一次关键帧配对与速度更新（与你的观测周期一致）
+
+  # ORB feature extraction
+  nfeatures: 2000           # ORB 特征点数量上限（大一些更稳，但更慢）
+
+  # Feature matching (ratio test)
+  ratio_thresh: 0.80        # Lowe ratio test 阈值（越小越严格，匹配更干净但更少）
+
+  # RANSAC homography
+  reproj_thresh: 3.0        # RANSAC 重投影阈值（像素），越小越严格
+  max_iters: 2000           # RANSAC 最大迭代次数
+  confidence: 0.995         # RANSAC 置信度
+
 weighted_speed:
   # Operational default: disabled.
   # When enabled: the displayed/returned speed uses confidence-weighted EMA.
   # 运维/部署默认：关闭。
   # 开启后：显示/输出的速度采用“置信度加权 EMA”，关闭则采用固定系数 EMA（ema_alpha_speed）。
-  enabled: false
+  enabled: true
 
   bbox:
     rho_size: 0.85               # EMA factor for bbox size reference / bbox 尺度参考 EMA 系数
@@ -86,7 +102,7 @@ diagnostics:
   # (e.g., every detection/velocity update step such as 1 per 5 frames), no extra sampling control here.
   # 注意：记录频率与算法观测频率一致（例如每 5 帧一次速度更新就写一次），无需额外采样参数。
   export:
-    enabled: false               # Enable export / 是否开启导出（默认关闭）
+    enabled: true               # Enable export / 是否开启导出（默认关闭）
 
     # Output directory for artifacts (project-neutral and user-configurable).
     # 输出目录：保持中性，由用户配置，不写死 debug/runs 等路径。
