@@ -1,5 +1,5 @@
 # configs/speed_config.yaml
-# Speed estimation & dynamic object config
+# Speed estimation & dynamic object configuration
 # 速度估计与动态目标相关配置
 
 model:
@@ -8,52 +8,110 @@ model:
   device: 0                                      # GPU device id (or 'cpu') / GPU 设备编号（或 'cpu'）
 
 tracking:
-  tracker_cfg: "./configs/trackers/botsort.yaml"  # Tracker config path / 跟踪器配置文件路径
-  conf: 0.3                                       # Detection confidence threshold / 检测置信度阈值
+  tracker_cfg: "./configs/trackers/botsort.yaml" # Tracker config path / 跟踪器配置文件路径
+  conf: 0.3                                      # Detection confidence threshold / 检测置信度阈值
 
 dynamic_classes:
   # Class names treated as dynamic vehicles.
   # 会被视为“动态车辆”的类别名称（基于 model.names 的名字）。
-  # 对于 COCO 预训练，通常包括：
-  # - car, bus, truck, motorcycle, bicycle
   names:
     - car
     - van
     - truck
     - bus
-
-  # If you prefer to specify by id, you can fill this after printing model.names.
-  # 如果你更习惯按 id 指定，可以在打印 model.names 后填写这里。
-  ids: []   # e.g. [2, 3, 5, 7]
+  ids: []                                        # Optional: specify by id / 可选：按 id 指定
 
 speed:
-  # Approximate car length (meters) / 近似车辆长度（米）
-  # 之前是单一 car_length_m，这里改为“默认长度 + 按类别长度覆盖”。
+  # Default and per-class approximate vehicle lengths (meters)
+  # 默认车辆长度与按类别覆盖的车辆长度（米）
   default_length_m: 5.0
-
-  # Per-class approximate vehicle lengths (meters)
-  # 按类别设置的车辆近似长度（米），键名需与 model.names 中的类别名称一致。
-  # 下面是一个典型设置（可根据你自己的数据集/场景微调）：
-  # - car   ~ 4.5 m  : 小轿车
-  # - van   ~ 5.0 m  : 面包车/厢式车
-  # - truck ~ 9.0 m  : 中型卡车（轻卡 6–7 m，重卡 12–13 m，这里取中等偏上）
-  # - bus   ~ 11.0 m : 城市公交车
   class_length_m:
     car: 4.8
     van: 5.0
     truck: 9.0
     bus: 11.0
 
-  ema_alpha_mpp: 0.30       # EMA factor for meters-per-pixel / 像素-米比例的指数平滑系数
-  ema_alpha_speed: 0.60     # EMA factor for speed / 速度的指数平滑系数
-  min_mpp: 0.005            # Lower bound of meters-per-pixel / 像素-米比例下界
-  max_mpp: 0.5              # Upper bound / 上界
-  max_speed_mps: 60.0       # Clamp speed (m/s) to filter outliers / 速度上限（米/秒），用于剔除离群值
+  ema_alpha_mpp: 0.30            # EMA factor for meters-per-pixel / 像素-米比例 EMA 系数
+  ema_alpha_speed: 0.60          # EMA factor for speed (fixed EMA baseline) / 固定 EMA 的速度系数
+  min_mpp: 0.005                 # Lower bound of meters-per-pixel / 像素-米比例下界
+  max_mpp: 0.5                   # Upper bound / 上界
+  max_speed_mps: 60.0            # Clamp speed (m/s) / 速度上限（米/秒），用于剔除离群值
 
 static_detection:
-  d_static_px: 2.5          # Distance threshold for static hypothesis / 静止判定的位移阈值
-  d_moving_px: 5.0          # Distance threshold for moving hypothesis / 运动判定的位移阈值
-  r_static_mean: 12.0       # Residual mean threshold for static / 亮度残差静止阈值
-  r_moving_mean: 25.0       # Residual mean threshold for moving / 亮度残差运动阈值
-  k_static: 6               # Hysteresis: frames to confirm static / 迟滞：连续多少帧判定为静止
-  k_moving: 2               # Hysteresis: frames to confirm moving / 迟滞：连续多少帧判定为运动
+  d_static_px: 2.5               # Static displacement threshold / 静止判定的位移阈值
+  d_moving_px: 5.0               # Moving displacement threshold / 运动判定的位移阈值
+  r_static_mean: 12.0            # Residual mean threshold (static) / 亮度残差静止阈值
+  r_moving_mean: 25.0            # Residual mean threshold (moving) / 亮度残差运动阈值
+  k_static: 6                    # Hysteresis frames to confirm static / 连续多少帧判定静止
+  k_moving: 2                    # Hysteresis frames to confirm moving / 连续多少帧判定运动
+
+homography:
+  # Background homography estimation (ORB + BFMatcher + RANSAC)
+  # 背景单应估计（ORB + BFMatcher + RANSAC），用于抵消无人机自运动
+  delta_frames: 5           # 每隔多少帧进行一次关键帧配对与速度更新（与你的观测周期一致）
+
+  # ORB feature extraction
+  nfeatures: 2000           # ORB 特征点数量上限（大一些更稳，但更慢）
+
+  # Feature matching (ratio test)
+  ratio_thresh: 0.80        # Lowe ratio test 阈值（越小越严格，匹配更干净但更少）
+
+  # RANSAC homography
+  reproj_thresh: 3.0        # RANSAC 重投影阈值（像素），越小越严格
+  max_iters: 2000           # RANSAC 最大迭代次数
+  confidence: 0.995         # RANSAC 置信度
+
+weighted_speed:
+  # Operational default: disabled.
+  # When enabled: the displayed/returned speed uses confidence-weighted EMA.
+  # 运维/部署默认：关闭。
+  # 开启后：显示/输出的速度采用“置信度加权 EMA”，关闭则采用固定系数 EMA（ema_alpha_speed）。
+  enabled: true
+
+  bbox:
+    rho_size: 0.85               # EMA factor for bbox size reference / bbox 尺度参考 EMA 系数
+    sigma_bbox: 0.15             # Sensitivity of bbox deviation mapping / 尺度偏离映射敏感度
+    w_min_bbox: 0.30             # Minimum bbox weight / bbox 权重下限
+
+  deltaV:
+    p: 3.0                       # Soft-gating exponent / 软门控指数
+    w_min_dv: 0.25               # Minimum deltaV weight / 跳变门控权重下限
+    dv_a: 5.0                    # ΔVmax constant term (km/h) / ΔVmax 固定项（km/h）
+    dv_b: 0.10                   # ΔVmax proportional term / ΔVmax 比例项
+
+  edge:
+    edge_ratio: 0.15             # Border band ratio of min(W,H) / 边缘带宽比例
+    w_min_edge: 0.40             # Minimum edge weight / 边缘权重下限
+
+  homo:
+    enabled: true
+    r0: 0.60                     # Inlier ratio baseline / 内点比例基线
+    N0: 200                      # Inlier count for full confidence / 满置信内点数
+    w_min_h: 0.30                # Minimum homography weight / 单应权重下限
+
+  weight_smooth:
+    eta_w: 0.20                  # EMA factor for total weight W / 总权重 W 的 EMA 系数
+    W_floor: 0.10                # Total weight floor / 总权重下限
+
+  eps: 1e-6                      # Numerical stability / 数值稳定项
+
+diagnostics:
+  # Optional analysis artifact export for evaluation and reporting.
+  # 用于评估与报告的可选诊断导出（默认关闭）。
+  # Note: records are emitted at the natural observation rate of the pipeline
+  # (e.g., every detection/velocity update step such as 1 per 5 frames), no extra sampling control here.
+  # 注意：记录频率与算法观测频率一致（例如每 5 帧一次速度更新就写一次），无需额外采样参数。
+  export:
+    enabled: true               # Enable export / 是否开启导出（默认关闭）
+
+    # Output directory for artifacts (project-neutral and user-configurable).
+    # 输出目录：保持中性，由用户配置，不写死 debug/runs 等路径。
+    out_dir: "outputs/diagnostics"
+
+    # Artifact name prefix (without extension).
+    # 输出文件名前缀（不含扩展名）。
+    file_prefix: "speed_smoothing"
+
+    # Export format: "csv" or "xlsx"
+    # 导出格式："csv" 或 "xlsx"
+    format: "xlsx"

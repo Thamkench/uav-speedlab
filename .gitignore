@@ -10,6 +10,8 @@ __pycache__/
 备用文件/
 
 # Optional: uncomment these if you don't want to version large data / weights
-# data/videos/
-# data/output/
+data/videos/
+data/output/
 # weights/*.pt
+runs/debug/
+output/
